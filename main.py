@@ -30,12 +30,6 @@ CAMERA_CONFIGS = [
         "name": "Camera 1",
         "rtsp_url": "rtsp://ins046msc:wQpQk35t@85.141.77.197:7554/ISAPI/Streaming/Channels/103"
     },
-    # Добавьте больше камер по необходимости
-    # {
-    #     "id": 2,
-    #     "name": "Camera 2", 
-    #     "rtsp_url": "rtsp://user:pass@ip:port/path"
-    # }
 ]
 
 def add_notification(camera_id: int, alert_types: List[str], message: str):
@@ -133,10 +127,51 @@ async def dashboard(request: Request):
             .status-warning { background: #ff9800; color: white; }
             .camera-video {
                 width: 100%;
+                height: 100%;
+                background: #000;
+                object-fit: contain;
+                display: block;
+                margin: 0 auto;
+                transition: opacity 0.3s ease;
+            }
+            .camera-video-container {
+                position: relative;
+                width: 100%;
                 height: 200px;
                 background: #000;
                 border-radius: 5px;
-                object-fit: cover;
+                overflow: hidden;
+                border: 1px solid #ddd;
+            }
+            .camera-video-overlay {
+                position: absolute;
+                top: 5px;
+                right: 5px;
+                background: rgba(0, 0, 0, 0.7);
+                color: white;
+                padding: 2px 6px;
+                border-radius: 3px;
+                font-size: 10px;
+                font-weight: bold;
+                z-index: 10;
+            }
+            .camera-video-container:hover .camera-video-overlay {
+                background: rgba(0, 0, 0, 0.9);
+            }
+            .camera-video-container::before {
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: linear-gradient(45deg, transparent 49%, rgba(255,255,255,0.1) 50%, transparent 51%);
+                opacity: 0;
+                transition: opacity 0.3s ease;
+                pointer-events: none;
+            }
+            .camera-video-container:hover::before {
+                opacity: 1;
             }
             .notifications {
                 background: white;
@@ -187,6 +222,8 @@ async def dashboard(request: Request):
         <div class="controls">
             <button class="btn" onclick="refreshStatus()">🔄 Обновить статус</button>
             <button class="btn btn-danger" onclick="clearNotifications()">🗑️ Очистить уведомления</button>
+            <button class="btn" onclick="testAlerts()" style="background: #ff9800;">🧪 Тест ошибок</button>
+            <button class="btn" onclick="simulatePoorConnection()" style="background: #9c27b0;">📡 Симуляция плохого соединения</button>
         </div>
         
         <div class="cameras-grid" id="camerasGrid">
@@ -213,17 +250,32 @@ async def dashboard(request: Request):
                         const card = document.createElement('div');
                         card.className = `camera-card ${camera.connection_good ? 'online' : 'offline'}`;
                         
-                        const statusClass = camera.connection_good ? 'status-online' : 'status-offline';
-                        const statusText = camera.connection_good ? 'Онлайн' : 'Офлайн';
+                        let statusClass, statusText;
+                        if (camera.connection_good && camera.connection_quality_good) {
+                            statusClass = 'status-online';
+                            statusText = 'Онлайн';
+                        } else if (camera.connection_good && !camera.connection_quality_good) {
+                            statusClass = 'status-warning';
+                            statusText = 'Плохое качество';
+                        } else {
+                            statusClass = 'status-offline';
+                            statusText = 'Офлайн';
+                        }
                         
                         card.innerHTML = `
                             <div class="camera-title">${camera.name} (ID: ${camera.camera_id})</div>
                             <div class="camera-status ${statusClass}">${statusText}</div>
-                            <img class="camera-video" src="/api/cameras/${camera.camera_id}/video" 
-                                 onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjY2NjIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk5vIFZpZGVvPC90ZXh0Pjwvc3ZnPg=='">
+                            <div class="camera-video-container">
+                                <img class="camera-video" src="/api/cameras/${camera.camera_id}/video" 
+                                     onload="this.style.opacity='1'" 
+                                     onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjMzMzIi8+PHRleHQgeD0iNTAlIiB5PSI0MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxNiIgZmlsbD0iI2ZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+U3RyZWFtIEVycm9yPC90ZXh0Pjx0ZXh0IHg9IjUwJSIgeT0iNjAlIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiNjY2MiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNhbWVyYSB7Y2FtZXJhLmNhbWVyYV9pZH08L3RleHQ+PC9zdmc+'; this.style.opacity='1'"
+                                     style="opacity: 0;">
+                                <div class="camera-video-overlay">LIVE</div>
+                            </div>
                             <div style="margin-top: 10px; font-size: 12px;">
                                 <div>Кадров: ${camera.stats.total_frames}</div>
                                 <div>Ошибок: ${camera.stats.connection_errors}</div>
+                                <div>Качество соединения: ${(camera.connection_quality * 100).toFixed(1)}%</div>
                                 ${camera.stats.last_alert ? `<div style="color: #f44336;">Последнее уведомление: ${camera.stats.last_alert.timestamp}</div>` : ''}
                             </div>
                         `;
@@ -276,6 +328,34 @@ async def dashboard(request: Request):
                 }
             }
             
+            async function testAlerts() {
+                try {
+                    // Тестируем для первой камеры (ID: 1)
+                    const response = await fetch('/api/cameras/1/test-alerts', { method: 'POST' });
+                    const result = await response.json();
+                    alert('Тестовые ошибки отправлены: ' + result.message);
+                    // Обновляем уведомления через 2 секунды
+                    setTimeout(loadNotifications, 2000);
+                } catch (error) {
+                    console.error('Ошибка тестирования:', error);
+                    alert('Ошибка при тестировании: ' + error.message);
+                }
+            }
+            
+            async function simulatePoorConnection() {
+                try {
+                    // Симулируем плохое соединение для первой камеры (ID: 1)
+                    const response = await fetch('/api/cameras/1/simulate-poor-connection', { method: 'POST' });
+                    const result = await response.json();
+                    alert('Симуляция плохого соединения активирована: ' + result.message);
+                    // Обновляем статус через 1 секунду
+                    setTimeout(refreshStatus, 1000);
+                } catch (error) {
+                    console.error('Ошибка симуляции:', error);
+                    alert('Ошибка при симуляции: ' + error.message);
+                }
+            }
+            
             // Автообновление каждые 5 секунд
             setInterval(refreshStatus, 5000);
             
@@ -304,25 +384,47 @@ async def get_camera_video(camera_id: int):
     camera = cameras[camera_id]
     
     def generate_frames():
+        frame_count = 0
         while True:
-            frame = camera.get_current_frame()
-            if frame is not None:
-                # Кодируем кадр в JPEG
-                ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                if ret:
-                    frame_bytes = buffer.tobytes()
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-            else:
-                # Отправляем placeholder изображение
-                placeholder = np.zeros((200, 300, 3), dtype=np.uint8)
-                cv2.putText(placeholder, "No Video", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                ret, buffer = cv2.imencode('.jpg', placeholder)
-                if ret:
-                    frame_bytes = buffer.tobytes()
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-            time.sleep(0.1)
+            try:
+                frame = camera.get_current_frame()
+                if frame is not None:
+                    # Изменяем размер кадра для оптимизации
+                    height, width = frame.shape[:2]
+                    if width > 640:  # Масштабируем если слишком большое
+                        scale = 640 / width
+                        new_width = int(width * scale)
+                        new_height = int(height * scale)
+                        frame = cv2.resize(frame, (new_width, new_height))
+                    
+                    # Кодируем кадр в JPEG с оптимизацией
+                    ret, buffer = cv2.imencode('.jpg', frame, [
+                        cv2.IMWRITE_JPEG_QUALITY, 85,
+                        cv2.IMWRITE_JPEG_OPTIMIZE, 1
+                    ])
+                    if ret:
+                        frame_bytes = buffer.tobytes()
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                else:
+                    # Отправляем placeholder изображение с информацией
+                    placeholder = np.zeros((200, 400, 3), dtype=np.uint8)
+                    cv2.putText(placeholder, "No Video Signal", (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                    cv2.putText(placeholder, f"Camera {camera_id}", (50, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+                    
+                    ret, buffer = cv2.imencode('.jpg', placeholder, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    if ret:
+                        frame_bytes = buffer.tobytes()
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                
+                frame_count += 1
+                # Небольшая задержка для снижения нагрузки
+                time.sleep(0.05)  # 20 FPS
+                
+            except Exception as e:
+                logger.error(f"Ошибка в генерации кадра для камеры {camera_id}: {e}")
+                time.sleep(1)
     
     return StreamingResponse(
         generate_frames(),
@@ -363,13 +465,46 @@ async def restart_camera(camera_id: int):
     
     return {"message": f"Камера {camera_id} перезапущена"}
 
+@app.post("/api/cameras/{camera_id}/test-alerts")
+async def test_camera_alerts(camera_id: int):
+    """Тестирование системы уведомлений камеры"""
+    if camera_id not in cameras:
+        raise HTTPException(status_code=404, detail="Камера не найдена")
+    
+    camera = cameras[camera_id]
+    camera.force_test_alerts()
+    
+    return {"message": f"Тестовые уведомления отправлены для камеры {camera_id}"}
+
+@app.post("/api/cameras/{camera_id}/simulate-poor-connection")
+async def simulate_poor_connection(camera_id: int):
+    """Симуляция плохого качества соединения для тестирования"""
+    if camera_id not in cameras:
+        raise HTTPException(status_code=404, detail="Камера не найдена")
+    
+    camera = cameras[camera_id]
+    camera.simulate_poor_connection()
+    
+    return {"message": f"Симуляция плохого соединения активирована для камеры {camera_id}"}
+
 # Переопределяем метод send_alert в CameraMonitor для интеграции с FastAPI
 def setup_camera_alerts():
     """Настройка системы уведомлений для камер"""
     for camera in cameras.values():
         # Переопределяем метод send_alert для интеграции с FastAPI
         def create_alert_handler(cam_id):
-            def alert_handler(alert_types, message):
+            def alert_handler(alert_types):
+                # Создаем сообщение аналогично оригинальному методу
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                message = f"[{timestamp}] Камера {cam_id} ({camera.name}): "
+                
+                if "frozen" in alert_types:
+                    message += "ИЗОБРАЖЕНИЕ ЗАМОРОЖЕНО! "
+                if "stopped" in alert_types:
+                    message += "ИЗОБРАЖЕНИЕ ОСТАНОВИЛОСЬ! "
+                if "pixelated" in alert_types:
+                    message += "КАЧЕСТВО ИЗОБРАЖЕНИЯ УПАЛО! "
+                
                 add_notification(cam_id, alert_types, message)
             return alert_handler
         
