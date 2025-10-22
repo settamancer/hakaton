@@ -22,12 +22,13 @@ class CameraMonitor:
         self.last_frame_time = None
         self.is_running = False
         self.thread = None
+        self.video_cap = None  # Отдельный VideoCapture для видео потока
         
         # Пороги для детекции (более чувствительные настройки)
         self.freeze_threshold = 1000   # Минимальная разность между кадрами (уменьшено)
         self.freeze_frames = 3        # Количество кадров для определения заморозки (уменьшено)
         self.quality_threshold = 30   # Порог качества изображения (увеличен)
-        self.timeout_seconds = 20      # Таймаут для определения отсутствия кадров (уменьшен)
+        self.timeout_seconds = 5      # Таймаут для определения отсутствия кадров (уменьшен)
         
         # Дополнительные пороги для более точной детекции
         self.motion_threshold = 100   # Порог для детекции движения
@@ -54,9 +55,16 @@ class CameraMonitor:
         try:
             if self.cap is not None:
                 self.cap.release()
+            if self.video_cap is not None:
+                self.video_cap.release()
             
+            # Основное соединение для мониторинга
             self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Минимальный буфер
+            
+            # Отдельное соединение для видео потока
+            self.video_cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+            self.video_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             
             # Тестируем соединение
             ret, frame = self.cap.read()
@@ -254,6 +262,10 @@ class CameraMonitor:
             if self.is_frozen(frame):
                 alerts.append("frozen")
                 self.stats['frozen_frames'] += 1
+            else:
+                # Если качество хорошее и нет заморозки, можно считать что проблемы решены
+                # Это поможет автоматически разрешать уведомления при восстановлении
+                pass
             
         # Обновляем статистику
         self.stats['total_frames'] += 1
@@ -336,33 +348,45 @@ class CameraMonitor:
             self.thread.join(timeout=5)
         if self.cap:
             self.cap.release()
+        if self.video_cap:
+            self.video_cap.release()
         logger.info(f"Мониторинг камеры {self.camera_id} остановлен")
-
     def get_status(self) -> Dict:
-        """Получение текущего статуса камеры"""
-        # Вычисляем текущее качество соединения
-        current_quality = 0.0
-        if self.connection_quality_history:
-            current_quality = np.mean(self.connection_quality_history[-3:])  # Среднее за последние 3 кадра
-        
-        return {
-            'camera_id': self.camera_id,
-            'name': self.name,
-            'rtsp_url': self.rtsp_url,
-            'is_running': self.is_running,
-            'connection_good': self.connection_good,
-            'connection_quality': current_quality,
-            'connection_quality_good': self.is_connection_quality_good(),
-            'last_frame_time': self.last_frame_time,
-            'stats': self.stats.copy()
-        }
+            """Получение текущего статуса камеры"""
+            # Вычисляем текущее качество соединения
+            current_quality = 0.0
+            if self.connection_quality_history:
+                current_quality = float(np.mean(self.connection_quality_history[-3:]))  # Среднее за последние 3 кадра
+            
+            return {
+                'camera_id': self.camera_id,
+                'name': self.name,
+                'rtsp_url': self.rtsp_url,
+                'is_running': bool(self.is_running),
+                'connection_good': bool(self.connection_good),
+                'connection_quality': float(current_quality),
+                'connection_quality_good': bool(self.is_connection_quality_good()),
+                'last_frame_time': self.last_frame_time,
+                'stats': self.stats.copy()
+            }
 
     def get_current_frame(self) -> Optional[np.ndarray]:
         """Получение текущего кадра для отображения"""
-        if self.cap and self.connection_good:
-            ret, frame = self.cap.read()
-            if ret and frame is not None:
-                return frame
+        if self.video_cap and self.connection_good:
+            try:
+                ret, frame = self.video_cap.read()
+                if ret and frame is not None:
+                    return frame
+            except Exception as e:
+                logger.warning(f"Ошибка чтения кадра для видео потока камеры {self.camera_id}: {e}")
+                # Попытка переподключения видео потока
+                try:
+                    if self.video_cap:
+                        self.video_cap.release()
+                    self.video_cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+                    self.video_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception as reconnect_error:
+                    logger.error(f"Ошибка переподключения видео потока камеры {self.camera_id}: {reconnect_error}")
         return None
 
     def force_test_alerts(self):
