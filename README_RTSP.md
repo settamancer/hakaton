@@ -43,6 +43,40 @@ pip install -r requirements_rtsp.txt
 ```bash
 pip install git+https://github.com/bbc/rd-apmm-python-lib-rtp.git
 ```
+Настройте камеры в файле `main.py` в секции `CAMERA_CONFIGS`
+
+## Запуск
+
+```bash
+python main.py
+```
+
+Или через uvicorn:
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+## Использование
+
+1. Откройте браузер и перейдите по адресу: `http://localhost:8000`
+2. На главной странице вы увидите:
+   - Статус всех камер
+   - Видео потоки в реальном времени
+   - Уведомления о проблемах
+   - Статистику работы
+
+
+## Алгоритмы детекции
+
+### Детекция заморозки
+- Сравнение кадров по разности пикселей
+- Порог: 1000 пикселей (настраивается)
+- Количество кадров для подтверждения: 3
+
+### Детекция пикселизации
+- Анализ контраста изображения
+- Детекция блоков артефактов
+- Порог качества: 20 (настраивается)
 
 ## Использование
 
@@ -184,6 +218,33 @@ camera = CameraMonitor(
 # Запуск мониторинга
 camera.connect()
 camera.start()
-```
 
-Все существующие API endpoints продолжают работать без изменений.
+
+## API Endpoints
+
+- `GET /` - Главная страница с дашбордом
+- `GET /api/cameras/status` - Статус всех камер
+- `GET /api/cameras/{camera_id}/video` - Видео поток камеры
+- `GET /api/cameras/{camera_id}/stats` - Статистика камеры
+- `POST /api/cameras/{camera_id}/restart` - Перезапуск камеры
+- `GET /api/notifications` - Список уведомлений
+- `POST /api/notifications/clear` - Очистка уведомлений
+
+## Настройка камер
+
+В файле `main.py` найдите секцию `CAMERA_CONFIGS` и добавьте ваши камеры:
+
+python
+CAMERA_CONFIGS = [
+    {
+        "id": 1,
+        "name": "Camera 1",
+        "rtsp_url": "rtsp://user:pass@ip:port/path"
+    },
+    {
+        "id": 2,
+        "name": "Camera 2", 
+        "rtsp_url": "rtsp://user:pass@ip:port/path"
+    }
+]
+```

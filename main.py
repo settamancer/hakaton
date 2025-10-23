@@ -1,26 +1,65 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
 import time
 import threading
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import logging
+import json
+import asyncio
 from camera_monitor_new import CameraMonitor
-
+import asyncio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 app = FastAPI(title="Camera Monitoring System", version="1.0.0")
 
+# Добавляем CORS для работы с фронтендом
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 cameras: Dict[int, CameraMonitor] = {}
-notifications: List[Dict] = []
+notifications: List[Dict[str, Any]] = []
 notifications_lock = threading.Lock()
 
+# WebSocket соединения
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def send_personal_message(self, message: str, websocket: WebSocket):
+        await websocket.send_text(message)
+
+    async def broadcast(self, message: str):
+        disconnected_connections = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except Exception:
+                disconnected_connections.append(connection)
+        
+        # Удаляем неактивные соединения
+        for connection in disconnected_connections:
+            self.disconnect(connection)
+
+manager = ConnectionManager()
 
 CAMERA_CONFIGS = [
     {
@@ -30,8 +69,8 @@ CAMERA_CONFIGS = [
     },
 ]
 
-
 def add_notification(camera_id: int, alert_types: List[str], message: str):
+    notification: Dict[str, Any] = {}
     with notifications_lock:
         existing_notification = None
         for notification in notifications:
@@ -44,6 +83,7 @@ def add_notification(camera_id: int, alert_types: List[str], message: str):
         if existing_notification:
             existing_notification["timestamp"] = datetime.now().isoformat()
             existing_notification["message"] = message
+            notification = existing_notification
             logger.warning(f"Updated notification: {message}")
         else:
             notification = {
@@ -60,6 +100,11 @@ def add_notification(camera_id: int, alert_types: List[str], message: str):
                 notifications.pop(0)
             logger.warning(f"New notification: {message}")
 
+        # Отправляем уведомление через WebSocket
+        asyncio.create_task(manager.broadcast(json.dumps({
+            "type": "notification",
+            "data": notification
+        })))
 
 def start_camera_monitoring():
     for config in CAMERA_CONFIGS:
@@ -71,7 +116,6 @@ def start_camera_monitoring():
         cameras[config["id"]] = camera
         camera.start()
         logger.info(f"Started camera {config['id']}: {config['name']}")
-
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
@@ -192,6 +236,23 @@ async def dashboard(request: Request):
     border-radius: 4px;
     font-size: 0.9rem;
   }
+  .toast {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: #d32f2f;
+    color: white;
+    padding: 12px 16px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    z-index: 1000;
+    max-width: 400px;
+    animation: slideIn 0.3s ease-out;
+  }
+  @keyframes slideIn {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
   #refresh-button {
     background: #1a73e8;
     border: none;
@@ -264,13 +325,59 @@ async def dashboard(request: Request):
   let camera1Marker = L.marker(moscowCoords, {icon: greenIcon}).addTo(map)
     .bindPopup("Загрузка статуса камеры 1...");
 
+  // WebSocket соединение
+  let ws = null;
+  function connectWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/notifications`;
+    
+    ws = new WebSocket(wsUrl);
+    
+    ws.onopen = function(event) {
+      console.log('WebSocket соединение установлено');
+    };
+    
+    ws.onmessage = function(event) {
+      try {
+        const data = JSON.parse(event.data);
+        console.log('Получено WebSocket сообщение:', data);
+        
+        if (data.type === 'notification') {
+          showToast(data.data.message);
+          updateNotifications();
+        }
+      } catch (e) {
+        console.error('Ошибка парсинга WebSocket сообщения:', e);
+      }
+    };
+    
+    ws.onclose = function(event) {
+      console.log('WebSocket соединение закрыто, переподключение через 3 секунды...');
+      setTimeout(connectWebSocket, 3000);
+    };
+    
+    ws.onerror = function(error) {
+      console.error('WebSocket ошибка:', error);
+    };
+  }
+
+  function showToast(message) {
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    
+    setTimeout(() => {
+      toast.remove();
+    }, 5000);
+  }
+
   async function loadCameras() {
     try {
       console.log('Загрузка статусов камер...');
       const resp = await fetch(`/api/cameras/status?t=${Date.now()}`);
       const cameras = await resp.json();
       console.log('Получены данные камер:', cameras);
-
       const cam1 = cameras.find(c => c.camera_id === 1);
       camera1Online = cam1 ? cam1.connection_good === true : false;
       console.log('Статус камеры 1:', camera1Online, cam1);
@@ -330,21 +437,33 @@ async def dashboard(request: Request):
       summary.textContent = `Всего камер: ${allCameras.length} | Онлайн: ${countOnline}`;
       console.log(`Обновлено: ${allCameras.length} камер, ${countOnline} онлайн`);
 
-      // Show single latest alert notification for camera 1
-      const notifList = document.getElementById('notification-list');
-      notifList.innerHTML = '';
-      if(cam1 && cam1.stats && cam1.stats.last_alert){
-        const n = cam1.stats.last_alert;
-        const div = document.createElement('div');
-        div.className = 'notification-item';
-        div.textContent = n.message;
-        notifList.appendChild(div);
-      } else {
-        notifList.innerHTML = '<em>Нет уведомлений</em>';
-      }
+      updateNotifications();
 
     } catch(e) {
       console.error("Ошибка загрузки камер или уведомлений:", e);
+    }
+  }
+
+  async function updateNotifications() {
+    try {
+      const resp = await fetch('/api/notifications');
+      const notifications = await resp.json();
+      
+      const notifList = document.getElementById('notification-list');
+      notifList.innerHTML = '';
+      
+      if (notifications.length > 0) {
+        notifications.slice(-5).reverse().forEach(notif => {
+          const div = document.createElement('div');
+          div.className = 'notification-item';
+          div.textContent = notif.message;
+          notifList.appendChild(div);
+        });
+      } else {
+        notifList.innerHTML = '<em>Нет уведомлений</em>';
+      }
+    } catch(e) {
+      console.error("Ошибка загрузки уведомлений:", e);
     }
   }
 
@@ -353,12 +472,31 @@ async def dashboard(request: Request):
   }
 
   setInterval(refreshStatus, 5000);
-  window.onload = refreshStatus;
+  window.onload = function() {
+    connectWebSocket();
+    refreshStatus();
+  };
 </script>
 </body>
 </html>
     """
 
+# WebSocket endpoint
+@app.websocket("/ws/notifications")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Эхо сообщение обратно
+            await manager.send_personal_message(f"Message text was: {data}", websocket)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+@app.get("/api/notifications")
+async def get_notifications():
+    with notifications_lock:
+        return notifications[-20:]  # Последние 20 уведомлений
 
 @app.get("/api/cameras/status")
 async def get_cameras_status():
@@ -371,7 +509,6 @@ async def get_cameras_status():
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
-
 
 @app.get("/api/cameras/{camera_id}/video")
 async def get_camera_video(camera_id: int):
@@ -441,15 +578,12 @@ async def get_camera_video(camera_id: int):
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
-
-# ... остальные обработчики каналов, уведомлений и прочее ...
-
 def setup_camera_alerts():
     for camera in cameras.values():
-        def create_alert_handler(cam_id):
-            def alert_handler(alert_types):
+        def create_alert_handler(cam_id: int, cam_name: str):
+            def alert_handler(alert_types: List[str]):
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                message = f"[{timestamp}] Камера {cam_id} ({camera.name}): "
+                message = f"[{timestamp}] Камера {cam_id} ({cam_name}): "
                 if "frozen" in alert_types:
                     message += "ИЗОБРАЖЕНИЕ ЗАМОРОЖЕНО! "
                 if "stopped" in alert_types:
@@ -458,16 +592,30 @@ def setup_camera_alerts():
                     message += "КАЧЕСТВО ИЗОБРАЖЕНИЯ УПАЛО! "
                 add_notification(cam_id, alert_types, message)
             return alert_handler
-        camera.send_alert = create_alert_handler(camera.camera_id)
+        
+        # Используем setattr для установки обработчика
+        setattr(camera, 'send_alert', create_alert_handler(camera.camera_id, camera.name))
 
+async def monitor_camera_status():
+    previous_statuses = {}
+    while True:
+        for camera_id, camera in cameras.items():
+            status = camera.get_status()
+            prev_status = previous_statuses.get(camera_id)
+            if prev_status != status:
+                if not status.get('connection_good', True):
+                    camera.send_alert(['stopped'])
+            previous_statuses[camera_id] = status
+        await asyncio.sleep(5)
 
 @app.on_event("startup")
 async def startup_event():
     logger.info("Запуск системы мониторинга камер...")
     start_camera_monitoring()
+    # Даем время камерам инициализироваться перед настройкой алертов
+    await asyncio.sleep(2)
     setup_camera_alerts()
     logger.info("Система мониторинга запущена")
-
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -475,7 +623,6 @@ async def shutdown_event():
     for camera in cameras.values():
         camera.stop()
     logger.info("Система мониторинга остановлена")
-
 
 if __name__ == "__main__":
     import uvicorn
